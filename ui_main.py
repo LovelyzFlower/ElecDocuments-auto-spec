@@ -237,7 +237,7 @@ class MainWindow(QMainWindow):
                         y_offset += pix.height + 20 # 20px padding between pages
                         
                     self.statusBar().showMessage(f"PDF 로드 완료 ({len(doc)}페이지).")
-                    self.graphics_view.fitInView(self.graphics_scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+                    self.fit_to_width()
                 except Exception as e:
                     QMessageBox.critical(self, "오류", f"PDF 로드 실패: {e}")
             elif file_name.lower().endswith('.docx'):
@@ -246,16 +246,31 @@ class MainWindow(QMainWindow):
             else:
                 pixmap = QPixmap(self.image_path)
                 self.graphics_scene.addPixmap(pixmap)
-                self.graphics_view.fitInView(self.graphics_scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+                self.fit_to_width()
                 self.statusBar().showMessage("이미지 로드 완료.")
                 
             self.progress_bar.setVisible(False)
             self.check_ready_state()
 
     def resizeEvent(self, event):
-        if self.graphics_scene.items():
-            self.graphics_view.fitInView(self.graphics_scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+        self.fit_to_width()
         super().resizeEvent(event)
+
+    def fit_to_width(self):
+        if not self.graphics_scene.items():
+            return
+        rect = self.graphics_scene.itemsBoundingRect()
+        if rect.width() == 0:
+            return
+        
+        # Calculate scale factor to fit the width. 
+        # Subtracting 5 pixels to prevent horizontal scrollbar.
+        view_width = self.graphics_view.viewport().width() - 5
+        scale_factor = view_width / rect.width()
+        
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(scale_factor, scale_factor)
+        self.graphics_view.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
     def check_ready_state(self):
         if self.metadata_df is not None and self.image_path is not None:
