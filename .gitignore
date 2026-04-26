@@ -1,0 +1,16 @@
+__pycache__/
+venv/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.env
+.venv
+*.xlsx
+*.pdf
+*.docx
+*.png
+*.jpg
+*.jpeg
+temp_pdf_page_*.png
