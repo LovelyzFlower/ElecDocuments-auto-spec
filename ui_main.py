@@ -1,20 +1,94 @@
 import sys
 import os
 import subprocess
+import json
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                                QTableWidget, QTableWidgetItem, QHeaderView, 
                                QComboBox, QMessageBox, QSplitter, QGraphicsView,
                                QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
-                               QProgressBar, QCheckBox)
+                               QProgressBar, QCheckBox, QRubberBand)
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QBrush
-from PySide6.QtCore import Qt, QThread, Signal, QRectF, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QTimer, QRect, QSize
 
 from ocr_engine import OCREngine
 from matcher import SemanticMatcher
 from utils import load_metadata, save_spec, draw_bboxes_on_image
 import fitz
 from docx import Document
+
+MODERN_QSS = """
+QMainWindow {
+    background-color: #F3F4F6;
+    font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', 'Segoe UI', sans-serif;
+}
+QWidget {
+    font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', 'Segoe UI', sans-serif;
+    color: #1F2937;
+}
+QPushButton {
+    background-color: #2563EB;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-weight: bold;
+    font-size: 14px;
+}
+QPushButton:hover {
+    background-color: #1D4ED8;
+}
+QPushButton:pressed {
+    background-color: #1E40AF;
+}
+QPushButton:disabled {
+    background-color: #9CA3AF;
+    color: #E5E7EB;
+}
+QTableWidget {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D5DB;
+    border-radius: 8px;
+    gridline-color: #F3F4F6;
+    selection-background-color: #EFF6FF;
+    selection-color: #1F2937;
+}
+QHeaderView::section {
+    background-color: #F9FAFB;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid #D1D5DB;
+    border-right: 1px solid #E5E7EB;
+    font-weight: bold;
+    color: #4B5563;
+}
+QGraphicsView {
+    border: 1px solid #D1D5DB;
+    border-radius: 8px;
+    background-color: #E5E7EB;
+}
+QProgressBar {
+    border: 1px solid #D1D5DB;
+    border-radius: 6px;
+    background-color: #E5E7EB;
+    text-align: center;
+    color: #1F2937;
+    font-weight: bold;
+}
+QProgressBar::chunk {
+    background-color: #10B981;
+    border-radius: 5px;
+}
+QComboBox {
+    border: 1px solid #D1D5DB;
+    border-radius: 4px;
+    padding: 4px;
+    background-color: white;
+}
+QComboBox::drop-down {
+    border: none;
+}
+"""
 
 class WorkerThread(QThread):
     finished = Signal(object)
@@ -76,26 +150,86 @@ class InteractiveRectItem(QGraphicsRectItem):
         if self.blink_count >= 6: # 3 flashes
             self.blink_timer.stop()
 
+class CustomGraphicsView(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.right_drag_start = None
+        self.rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self.right_drag_start = event.pos()
+            self.rubber_band.setGeometry(QRect(self.right_drag_start, QSize()))
+            self.rubber_band.show()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+            
+    def mouseMoveEvent(self, event):
+        if self.right_drag_start is not None and (event.buttons() & Qt.RightButton):
+            rect = QRect(self.right_drag_start, event.pos()).normalized()
+            self.rubber_band.setGeometry(rect)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+            
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton and self.right_drag_start is not None:
+            rect = self.rubber_band.geometry()
+            self.rubber_band.hide()
+            self.right_drag_start = None
+            
+            # Map viewport rect to scene rect
+            scene_rect = self.mapToScene(rect).boundingRect()
+            
+            # Find and update items
+            items = self.scene().items(scene_rect)
+            for item in items:
+                if isinstance(item, InteractiveRectItem):
+                    if item.is_included: # only toggle if currently included
+                        item.is_included = False
+                        item.update_style()
+                        item.callback(item.row_idx, False)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Auto-Spec: AI-based E-Form Variable Specifier")
-        self.resize(1200, 900) # Increased size for better A4 viewing
+        self.resize(1400, 1800) # Increased height to double the vertical size of viewer and grid
+        self.setStyleSheet(MODERN_QSS)
 
         # Main Layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+
+        # Header Section
+        header_layout = QVBoxLayout()
+        title_label = QLabel("Auto-Spec 🪄")
+        title_label.setStyleSheet("font-size: 26px; font-weight: bold; color: #111827;")
+        
+        desc_label = QLabel("이미지, PDF, DOCX 파일에서 텍스트를 추출하고, AI 의미 유사도를 통해 표준 메타데이터 변수명으로 자동 매핑합니다.\n우클릭 드래그를 통해 불필요한 항목을 빠르게 제외할 수 있습니다.")
+        desc_label.setStyleSheet("font-size: 14px; color: #4B5563; margin-bottom: 10px;")
+        desc_label.setWordWrap(True)
+        
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(desc_label)
+        main_layout.addLayout(header_layout)
 
         # Splitter for left (image) and right (table)
         splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, stretch=1)
 
         # Left Panel (Image Viewer)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         
-        self.graphics_view = QGraphicsView()
+        self.graphics_view = CustomGraphicsView()
         self.graphics_scene = QGraphicsScene()
         self.graphics_view.setScene(self.graphics_scene)
         self.graphics_view.setStyleSheet("border: 1px solid #ccc; background-color: #f9f9f9;")
@@ -121,8 +255,8 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.table_widget)
         splitter.addWidget(right_panel)
 
-        # Set Splitter ratio to strongly vertical proportion (e.g. 450 width vs 750 width for right)
-        splitter.setSizes([450, 750])
+        # Set Splitter ratio to give more width to the viewer
+        splitter.setSizes([650, 750])
 
         # Bottom Panel (Controls)
         bottom_panel = QWidget()
@@ -170,6 +304,24 @@ class MainWindow(QMainWindow):
         self.ocr_engine = None
         self.matcher = None
 
+        # Auto-load cached metadata if it exists
+        QTimer.singleShot(100, self.load_cached_metadata)
+
+    def load_cached_metadata(self):
+        cache_file = "cached_metadata.json"
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    self.metadata_mapping = json.load(f)
+                    
+                metadata_items = list(self.metadata_mapping.keys())
+                if metadata_items:
+                    # We DO NOT load SemanticMatcher here anymore. It will be lazy-loaded when "Map" is clicked.
+                    self.statusBar().showMessage(f"이전 세션의 메타데이터 로드 완료! (항목 수: {len(metadata_items)})")
+                    self.check_ready_state()
+            except Exception as e:
+                print(f"캐시 로드 실패: {e}")
+
     def load_metadata_action(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "메타데이터 열기", "", "Excel Files (*.xlsx *.xls);;JSON Files (*.json);;CSV Files (*.csv)")
         if file_name:
@@ -189,16 +341,16 @@ class MainWindow(QMainWindow):
                         
                 metadata_items = list(self.metadata_mapping.keys())
                 
-                # Initialize matcher if not already
-                if self.matcher is None:
-                    self.statusBar().showMessage("Semantic Matcher 모델 로딩 중... (처음 실행 시 다소 시간이 걸릴 수 있습니다.)")
-                    self.progress_bar.setVisible(True)
-                    self.progress_bar.setRange(0, 0)
-                    QApplication.processEvents()
-                    self.matcher = SemanticMatcher()
-                    self.progress_bar.setVisible(False)
-
-                self.matcher.fit_metadata(metadata_items)
+                # If matcher is already loaded, update it. Otherwise, wait until mapping phase.
+                if self.matcher is not None:
+                    self.matcher.fit_metadata(metadata_items)
+                
+                # Save to cache
+                try:
+                    with open("cached_metadata.json", "w", encoding="utf-8") as f:
+                        json.dump(self.metadata_mapping, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    print(f"캐시 저장 실패: {e}")
                 
                 QMessageBox.information(self, "성공", f"메타데이터 로드 완료! (항목 수: {len(metadata_items)})")
                 self.statusBar().showMessage("메타데이터 로드 완료.")
@@ -273,7 +425,7 @@ class MainWindow(QMainWindow):
         self.graphics_view.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
     def check_ready_state(self):
-        if self.metadata_df is not None and self.image_path is not None:
+        if self.metadata_mapping and self.image_path is not None:
             self.btn_extract.setEnabled(True)
 
     def run_extraction_action(self):
@@ -411,6 +563,14 @@ class MainWindow(QMainWindow):
                 rect_item.blink()
 
     def run_map_action(self):
+        if self.matcher is None:
+            self.statusBar().showMessage("AI 모델 로딩 중... (처음 실행 시 다소 시간이 걸릴 수 있습니다.)")
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            QApplication.processEvents()
+            self.matcher = SemanticMatcher()
+            self.matcher.fit_metadata(list(self.metadata_mapping.keys()))
+            
         self.statusBar().showMessage("매핑 중...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
@@ -469,7 +629,7 @@ class MainWindow(QMainWindow):
             for m in match_list:
                 combo_box.addItem(f"{m['match']} ({m['score']:.2f})", userData=m['match'])
             
-            if self.metadata_df is not None:
+            if self.metadata_mapping:
                 combo_box.insertSeparator(combo_box.count())
                 for item in self.metadata_mapping.keys():
                     combo_box.addItem(item, userData=item)
